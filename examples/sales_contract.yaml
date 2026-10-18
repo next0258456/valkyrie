@@ -1,0 +1,50 @@
+version: "v1"
+dataset: "sales"
+owner: "sales-engineering@valkyrie.local"
+policies:
+  strict_schema: true
+  max_error_rate: 0.05
+  quarantine_action: "DLQ"
+schema:
+  - name: "sales_id"
+    type: "BIGINT"
+    not_null: true
+    unique: true
+  - name: "salesperson_id"
+    type: "BIGINT"
+    not_null: true
+    range:
+      min: 1
+      max: 23
+  - name: "customer_id"
+    type: "BIGINT"
+    not_null: true
+  - name: "product_id"
+    type: "BIGINT"
+    not_null: true
+  - name: "quantity"
+    type: "BIGINT"
+    not_null: true
+    range:
+      min: 1
+      max: 25
+  - name: "discount"
+    type: "DOUBLE"
+    not_null: true
+    range:
+      min: 0.0
+      max: 0.2
+  - name: "total_price"
+    type: "DOUBLE"
+    not_null: true
+  - name: "sales_date"
+    type: "TIMESTAMP"
+    not_null: true
+  - name: "transaction_number"
+    type: "VARCHAR"
+    not_null: true
+    pattern: "^[A-Z0-9]{20}$"
+custom_rules:
+  - name: "valid_quantity_and_discount"
+    expression: "quantity >= 1 AND discount >= 0.0"
+    error_code: "ERR_SALES_INTEGRITY"
