@@ -1,13 +1,16 @@
-# 04: Consolidated Testing Suite & Final Repo Slim-Down
+# 04: Restore Dropped Edge-Case Tests & Verify 100% Green
 
-**What to build:** Consolidate the 10 repetitive test files (945 lines) into a single concise `tests/test_valkyrie.py` (~200 lines) testing the single public seam (`to_sql`, `run`, `execute`, CLI). Verify total codebase under `src/valkyrie/` is ~200-250 lines and 100% of tests pass cleanly.
+**What to build:** In `tests/test_valkyrie.py`, add back comprehensive test coverage for: `unique` duplicate key violations, `FAIL_FAST` policy, first-violation short-circuit precedence, range dict syntax, S3 secret auto-configuration, whitelist validation, and zero-OOM breach execution.
 
-**Blocked by:** 03: 100% DuckDB-Native Execution, SQL Aggregations & Direct COPY TO
+**Blocked by:** 03: True Zero-OOM on Breach & DRY Metrics Construction
 
 **Status:** completed
 
-- [x] Consolidate 10 test files into `tests/test_valkyrie.py`.
-- [x] Delete redundant test files.
-- [x] 100% tests pass via `python -m pytest`.
-- [x] Total lines in `src/valkyrie/` is <= 250 lines.
-- [x] Clean, lean, professional repository structure.
+- [x] Add test for `unique` duplicate key violation (`ERR_DUPLICATE_KEY`).
+- [x] Add test for `quarantine_action: FAIL_FAST`.
+- [x] Add test for First-Violation Short-Circuit precedence.
+- [x] Add test for `range: {min: x, max: y}` dictionary syntax.
+- [x] Add test for `configure_cloud_storage` S3 credentials.
+- [x] Add test for zero-OOM breach in `execute()` (`e.dlq_df is None`).
+- [x] Add test for strict root and column whitelisting.
+- [x] 100% of tests pass cleanly.

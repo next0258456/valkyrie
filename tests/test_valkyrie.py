@@ -62,7 +62,7 @@ schema:
   - name: "id"
     type: "INT"
 """)
-    with pytest.raises(ValueError, match="Prohibited.*sla"):
+    with pytest.raises(ValueError, match="Unknown or prohibited key 'sla'"):
         load_contract(p)
 
 
@@ -270,3 +270,119 @@ def test_preflight_complex_type_mismatch():
     sql = "SELECT 123 AS meta"  # meta is INTEGER, not STRUCT!
     with pytest.raises(SchemaConformanceException, match="ERR_SCHEMA_TYPE_MISMATCH"):
         run(sql=sql, contract=contract)
+
+
+# 7. RESTORED CRITICAL EDGE CASES (Ticket 04)
+def test_unique_duplicate_key_violation():
+    """Verify unique constraint trips ERR_DUPLICATE_KEY via DuckDB window function."""
+    contract = {
+        "dataset": "users",
+        "owner": "security@valkyrie.local",
+        "schema": [{"name": "user_id", "type": "INT", "unique": True}],
+    }
+    sql = "SELECT * FROM (VALUES (1), (2), (1)) AS t(user_id)"
+    clean, dlq = run(sql=sql, contract=contract, raise_on_breach=False)
+    assert clean.num_rows == 1
+    assert dlq.num_rows == 2
+    assert all(code == "ERR_DUPLICATE_KEY" for code in dlq.column("_error_code").to_pylist())
+
+
+def test_quarantine_action_fail_fast():
+    """quarantine_action: FAIL_FAST trips on any invalid row regardless of max_error_rate."""
+    contract = {
+        "dataset": "transactions",
+        "owner": "fraud@valkyrie.local",
+        "policies": {"max_error_rate": 0.99, "quarantine_action": "FAIL_FAST"},
+        "schema": [{"name": "tx_id", "type": "INT", "not_null": True}],
+    }
+    sql = "SELECT * FROM (VALUES (1), (2), (NULL)) AS t(tx_id)"
+    with pytest.raises(ContractBreachException, match="Quarantine policy is FAIL_FAST"):
+        run(sql=sql, contract=contract, raise_on_breach=True)
+
+
+def test_first_violation_precedence():
+    """First-violation short-circuit: null check fires before range check."""
+    contract = {
+        "dataset": "orders",
+        "owner": "ops@valkyrie.local",
+        "schema": [{"name": "price", "type": "DOUBLE", "not_null": True, "range": [0, 100]}],
+    }
+    sql = "SELECT NULL AS price"
+    clean, dlq = run(sql=sql, contract=contract, raise_on_breach=False)
+    assert dlq.column("_error_code").to_pylist() == ["ERR_NULL_VIOLATION"]
+
+
+def test_range_dict_syntax():
+    """Range supports dict syntax {min: x, max: y} in addition to list."""
+    contract = {
+        "dataset": "sensor",
+        "owner": "iot@valkyrie.local",
+        "schema": [{"name": "temp", "type": "DOUBLE", "range": {"min": -20.0, "max": 50.0}}],
+    }
+    sql = "SELECT * FROM (VALUES (-25.0), (25.0), (60.0)) AS t(temp)"
+    clean, dlq = run(sql=sql, contract=contract, raise_on_breach=False)
+    assert clean.num_rows == 1
+    assert dlq.num_rows == 2
+
+
+def test_configure_cloud_storage_secret(monkeypatch):
+    """Auto-detects S3 environment variables and builds secret config."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test_key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test_secret")
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "http://minio:9000")
+    monkeypatch.setenv("S3_USE_SSL", "false")
+    monkeypatch.setenv("S3_URL_STYLE", "path")
+
+    from valkyrie.engine import configure_cloud_storage
+    con = duckdb.connect()
+    # Must execute without error
+    configure_cloud_storage(con, "s3://my-bucket/orders.parquet")
+
+
+def test_execute_zero_oom_on_breach(tmp_path, valid_contract_yaml):
+    """When execute encounters a breach on a large dataset, DLQ is persisted and dlq_df is None (Zero-OOM)."""
+    clean_path = tmp_path / "clean_oom_fail.parquet"
+    dlq_path = tmp_path / "dlq_oom_fail.parquet"
+    # Breach query: 100% error rate
+    sql = "SELECT NULL AS order_id, 'CUST-001' AS customer_id, 'NEW' AS status, 10.0 AS amount"
+
+    with pytest.raises(ContractBreachException) as exc_info:
+        execute(
+            sql=sql,
+            contract=valid_contract_yaml,
+            write_clean=str(clean_path),
+            write_dlq=str(dlq_path),
+        )
+
+    # DLQ Parquet was safely streamed to disk
+    assert dlq_path.exists()
+    assert pq.read_table(dlq_path).num_rows == 1
+    # Zero-OOM guarantee on breach: exception holds None for dlq_df when called from execute
+    assert exc_info.value.dlq_df is None
+
+
+def test_contract_strict_root_and_column_whitelist(tmp_path):
+    """Arbitrary root keys or unknown column attributes are strictly rejected."""
+    p1 = tmp_path / "unknown_root.yaml"
+    p1.write_text("dataset: 'd'\nowner: 'o'\nunknown_meta: 123\nschema:\n  - name: 'a'\n")
+    with pytest.raises(ValueError, match="Unknown or prohibited key 'unknown_meta'"):
+        load_contract(p1)
+
+    p2 = tmp_path / "unknown_col.yaml"
+    p2.write_text("dataset: 'd'\nowner: 'o'\nschema:\n  - name: 'a'\n    not_nul: true\n")
+    with pytest.raises(ValueError, match="Unknown column attribute 'not_nul'"):
+        load_contract(p2)
+
+
+def test_contract_rejects_empty_schema_and_empty_expression(tmp_path):
+    """Empty schema list and empty custom rule expression are rejected."""
+    p1 = tmp_path / "empty_schema.yaml"
+    p1.write_text("dataset: 'd'\nowner: 'o'\nschema: []\n")
+    with pytest.raises(ValueError, match="at least one column"):
+        load_contract(p1)
+
+    p2 = tmp_path / "empty_expr.yaml"
+    p2.write_text("dataset: 'd'\nowner: 'o'\nschema:\n  - name: 'a'\ncustom_rules:\n  - name: 'r'\n    expression: '  '\n")
+    with pytest.raises(ValueError, match="non-empty 'expression'"):
+        load_contract(p2)
+

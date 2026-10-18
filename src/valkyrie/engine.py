@@ -2,6 +2,7 @@
 
 from typing import Any, Dict, Iterator, Optional, Union
 from pathlib import Path
+import re
 import time
 import duckdb
 import pyarrow as pa
@@ -50,8 +51,11 @@ def _classify_type(type_str: str) -> str:
     t = type_str.strip().upper()
     if t.startswith("STRUCT"):
         return "STRUCT"
-    if t.endswith("[]") or t.startswith("LIST") or t.startswith("ARRAY"):
+    # Matches LIST, ARRAY, [], or fixed-size array INT[3]
+    if re.search(r'\[\s*\d*\s*\]', t) or t.startswith("LIST") or t.startswith("ARRAY"):
         return "LIST"
+    if t.startswith("INTERVAL"):
+        return "INTERVAL"
     if "TIMESTAMP" in t or "DATETIME" in t:
         return "TIMESTAMP"
     if t in ("DATE",):
@@ -60,7 +64,9 @@ def _classify_type(type_str: str) -> str:
         return "TIME"
     if t in ("BOOLEAN", "BOOL"):
         return "BOOLEAN"
-    if any(t.startswith(num) for num in ("BIGINT", "INT", "SMALLINT", "TINYINT", "DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC", "HUGEINT")):
+    # Match numeric types, including unsigned (UTINYINT, UINTEGER, UBIGINT, UHUGEINT) and decimals
+    numeric_pattern = r'^(U?(BIGINT|INTEGER|INT|SMALLINT|TINYINT|HUGEINT)|DOUBLE|FLOAT|REAL|DECIMAL|NUMERIC)'
+    if re.match(numeric_pattern, t):
         return "NUMERIC"
     if any(t.startswith(st) for st in ("VARCHAR", "TEXT", "STRING", "CHAR", "BPCHAR")):
         return "STRING"
@@ -201,22 +207,28 @@ def run(
                 f"COPY (SELECT * FROM _valkyrie_annotated WHERE _error_code IS NOT NULL) TO '{dest_dlq}' (FORMAT PARQUET)"
             )
 
+        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        metrics = {
+            "dataset": contract.dataset,
+            "owner": contract.owner,
+            "total_rows": total_rows,
+            "clean_rows": clean_rows,
+            "error_rows": error_rows,
+            "error_rate": error_rate,
+            "duration_ms": duration_ms,
+            "max_error_rate": contract.policies.max_error_rate,
+            "quarantine_action": contract.policies.quarantine_action,
+            "breach_reason": breach_reason if is_breached else "",
+        }
+
         # Handle breach
         if is_breached and raise_on_breach:
-            dlq_arrow = con.execute("SELECT * FROM _valkyrie_annotated WHERE _error_code IS NOT NULL").to_arrow_table()
-            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
-            metrics = {
-                "dataset": contract.dataset,
-                "owner": contract.owner,
-                "total_rows": total_rows,
-                "clean_rows": clean_rows,
-                "error_rows": error_rows,
-                "error_rate": error_rate,
-                "duration_ms": duration_ms,
-                "max_error_rate": contract.policies.max_error_rate,
-                "quarantine_action": contract.policies.quarantine_action,
-                "breach_reason": breach_reason,
-            }
+            # Zero-OOM guarantee: if materialize_arrow is False, do NOT load multi-GB DLQ into Python memory
+            if materialize_arrow:
+                dlq_arrow = con.execute("SELECT * FROM _valkyrie_annotated WHERE _error_code IS NOT NULL").to_arrow_table()
+            else:
+                dlq_arrow = None
+
             msg = format_breach_banner(
                 dataset=contract.dataset,
                 owner=contract.owner,
@@ -249,20 +261,6 @@ def run(
 
     finally:
         con.execute("DROP TABLE IF EXISTS _valkyrie_annotated")
-
-    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
-    metrics = {
-        "dataset": contract.dataset,
-        "owner": contract.owner,
-        "total_rows": total_rows,
-        "clean_rows": clean_rows,
-        "error_rows": error_rows,
-        "error_rate": error_rate,
-        "duration_ms": duration_ms,
-        "max_error_rate": contract.policies.max_error_rate,
-        "quarantine_action": contract.policies.quarantine_action,
-        "breach_reason": breach_reason if is_breached else "",
-    }
 
     return ValidationResult(
         clean_arrow=clean_arrow,

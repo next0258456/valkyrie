@@ -5,7 +5,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import yaml
 
-PROHIBITED_FLUFF_KEYS = {"sla", "team", "pricing", "description", "business_logic"}
+ALLOWED_ROOT_KEYS = {"version", "dataset", "owner", "policies", "schema", "custom_rules"}
+ALLOWED_COLUMN_KEYS = {"name", "type", "not_null", "unique", "range", "enum", "pattern", "quality"}
+ALLOWED_POLICY_KEYS = {"strict_schema", "max_error_rate", "quarantine_action"}
+ALLOWED_RULE_KEYS = {"name", "expression", "error_code"}
 
 
 @dataclass
@@ -77,10 +80,10 @@ def load_contract(source: Union[str, Path, Dict[str, Any]]) -> ValkyrieContract:
     if not isinstance(data, dict):
         raise ValueError("Contract YAML must be a mapping dictionary")
 
-    # Reject prohibited fluff
+    # Strict whitelist on root keys
     for key in data:
-        if key.lower() in PROHIBITED_FLUFF_KEYS:
-            raise ValueError(f"Prohibited non-executable prose/fluff key '{key}' detected in contract.")
+        if key not in ALLOWED_ROOT_KEYS:
+            raise ValueError(f"Unknown or prohibited key '{key}' detected in contract root.")
 
     dataset = str(data.get("dataset", "")).strip()
     owner = str(data.get("owner", "")).strip()
@@ -89,7 +92,15 @@ def load_contract(source: Union[str, Path, Dict[str, Any]]) -> ValkyrieContract:
     if not owner:
         raise ValueError("Contract must declare a non-empty 'owner' for accountability")
 
+    raw_schema = data.get("schema")
+    if raw_schema is None or not isinstance(raw_schema, list) or len(raw_schema) == 0:
+        raise ValueError("Contract must declare at least one column in 'schema'")
+
     pol_data = data.get("policies") or {}
+    for k in pol_data:
+        if k not in ALLOWED_POLICY_KEYS:
+            raise ValueError(f"Unknown key '{k}' in policies config.")
+
     quarantine_action = pol_data.get("quarantine_action", "DLQ")
     if quarantine_action not in ("DLQ", "FAIL_FAST"):
         raise ValueError(f"Invalid quarantine_action '{quarantine_action}'. Must be 'DLQ' or 'FAIL_FAST'")
@@ -101,11 +112,18 @@ def load_contract(source: Union[str, Path, Dict[str, Any]]) -> ValkyrieContract:
     )
 
     schema_cols = []
-    for col_def in (data.get("schema") or []):
+    for col_def in raw_schema:
+        if not isinstance(col_def, dict):
+            raise ValueError("Each column in schema must be a mapping dictionary")
+        # Strict column whitelist
+        for col_k in col_def:
+            if col_k not in ALLOWED_COLUMN_KEYS:
+                raise ValueError(f"Unknown column attribute '{col_k}' in column '{col_def.get('name', '')}'")
+
         name = col_def.get("name")
-        if not name:
-            raise ValueError("Each column in schema must have a 'name'")
-        # Reject prose quality rules
+        if not name or not str(name).strip():
+            raise ValueError("Each column in schema must have a non-empty 'name'")
+
         for q in (col_def.get("quality") or []):
             if str(q.get("type", "")).lower() in ("text", "description", "prose"):
                 raise ValueError(f"Non-executable prose rule detected in column '{name}'.")
@@ -122,10 +140,18 @@ def load_contract(source: Union[str, Path, Dict[str, Any]]) -> ValkyrieContract:
             )
         )
 
-    custom_rules = [
-        CustomRule(name=r.get("name", "custom_rule"), expression=r.get("expression", ""), error_code=r.get("error_code"))
-        for r in (data.get("custom_rules") or [])
-    ]
+    custom_rules = []
+    for r in (data.get("custom_rules") or []):
+        if not isinstance(r, dict):
+            raise ValueError("Each custom rule must be a mapping dictionary")
+        for r_k in r:
+            if r_k not in ALLOWED_RULE_KEYS:
+                raise ValueError(f"Unknown attribute '{r_k}' in custom rule '{r.get('name', '')}'")
+        r_name = str(r.get("name", "custom_rule")).strip()
+        r_expr = str(r.get("expression", "")).strip()
+        if not r_expr:
+            raise ValueError(f"Custom rule '{r_name}' must declare a non-empty 'expression'")
+        custom_rules.append(CustomRule(name=r_name, expression=r_expr, error_code=r.get("error_code")))
 
     return ValkyrieContract(
         dataset=dataset,
