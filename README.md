@@ -122,11 +122,13 @@ if clean_arrow and clean_arrow.num_rows > 0:
 
 ```mermaid
 flowchart LR
-    Postgres["PostgreSQL Catalog"] -->|ATTACH POSTGRES| DuckLake["DuckLake (Bronze Tables)"]
-    DuckLake -->|Read Path| Valkyrie["Valkyrie Engine"]
+    Ingestion["Ingestion (Kafka / CDC / APIs)"] -->|Write Path| Bifrost["Bifrost Proxy (Iceberg REST Catalog)"]
+    Bifrost -->|ACID Append| IcebergBronze["Apache Iceberg (Bronze Layer)"]
+    Bifrost -.->|Sync Metadata| DuckLake["DuckLake (PostgreSQL Catalog)"]
+    DuckLake -->|Super-fast In-Process Read| Valkyrie["Valkyrie Engine (DuckDB)"]
     Valkyrie -->|DLQ| DLQ["DLQ (dlq.parquet)"]
-    Valkyrie -->|Clean Arrow Table| Bifrost["Bifrost Proxy"]
-    Bifrost -->|ACID Commit| Iceberg["Apache Iceberg (Silver)"]
+    Valkyrie -->|Clean Arrow Table| Bifrost
+    Bifrost -->|ACID Commit| IcebergSilver["Apache Iceberg (Silver Layer)"]
 ```
 
 ---

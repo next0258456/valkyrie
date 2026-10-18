@@ -318,17 +318,24 @@ Action Taken: Pipeline HALTED. DLQ preserved. Contact owner immediately!
 
 ### Môi Trường 6: Tích Hợp Ghi Bảng Apache Iceberg Tầng Silver (Bifrost Proxy & PyIceberg)
 
-Trong kiến trúc tổng thể **Yggdrasil Lakehouse**, Valkyrie đóng vai trò là Người gác cổng (Gatekeeper). Dữ liệu sạch sau khi được thẩm định sẽ được bàn giao dưới dạng Apache Arrow Table để **Bifrost Proxy** thực hiện ACID commit vào bảng Apache Iceberg tầng Silver.
+Trong kiến trúc tổng thể **Yggdrasil Lakehouse**, hệ thống sử dụng **Apache Iceberg** làm chuẩn mực lưu trữ mở từ Bronze đến Silver, nhưng được tăng tốc in-process bằng **DuckLake** và điều phối qua **Bifrost Proxy** (thay thế cho Apache Polaris Catalog cồng kềnh):
+
+1. **Ingestion Write Path**: Dữ liệu từ Kafka / CDC / APIs được nạp vào bảng **Apache Iceberg tầng Bronze** thông qua **Bifrost Proxy**.
+2. **Metadata Synchronization**: Bifrost Proxy tự động đồng bộ siêu dữ liệu bảng sang **DuckLake (với PostgreSQL Catalog)**.
+3. **Validation Gatekeeper**: **Valkyrie** nhúng DuckDB kết nối DuckLake để quét dữ liệu Bronze với tốc độ in-process tối đa, đối soát Hợp đồng Dữ liệu và phân loại dòng lỗi sang DLQ.
+4. **Silver Write Path**: Dữ liệu sạch (`clean_arrow`) được bàn giao lại cho Bifrost Proxy để commit ACID Append vào **Apache Iceberg tầng Silver**.
 
 #### Sơ Đồ Luồng Dữ Liệu Yggdrasil Lakehouse
 
 ```mermaid
 flowchart TD
-    Postgres["PostgreSQL Catalog"] -->|ATTACH POSTGRES| DuckLake["DuckLake (Bronze Tables)"]
-    DuckLake -->|Read Path: ducklake.bronze_orders| Valkyrie["Valkyrie Engine (DuckDB Single-Pass)"]
+    Ingestion["Ingestion (Kafka / CDC / APIs)"] -->|Write Path| Bifrost["Bifrost Proxy (Iceberg REST Catalog)"]
+    Bifrost -->|ACID Append| IcebergBronze["Apache Iceberg (Bronze Layer)"]
+    Bifrost -.->|Sync Metadata| DuckLake["DuckLake (PostgreSQL Catalog)"]
+    DuckLake -->|Super-fast Read: ducklake.bronze_orders| Valkyrie["Valkyrie Engine (DuckDB Single-Pass)"]
     Valkyrie -->|Validation & Segregation| Decision{"Hợp đồng đạt chuẩn?"}
     Decision -->|Dữ liệu lỗi| DLQ["DLQ (MinIO / S3 dlq.parquet)"]
-    Decision -->|Dữ liệu sạch: Arrow Table| Bifrost["Bifrost Proxy (REST Catalog / PyIceberg)"]
+    Decision -->|Dữ liệu sạch: Arrow Table| Bifrost
     Bifrost -->|ACID Commit| Silver["Apache Iceberg Table (Silver Layer)"]
 ```
 
@@ -336,6 +343,11 @@ flowchart TD
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                           YGGDRASIL DATA PIPELINE                               │
 │                                                                                 │
+│   0. NẠP DỮ LIỆU (Ingestion):                                                  │
+│      - Dữ liệu CDC / Streams ghi vào Apache Iceberg Bronze qua BIFROST PROXY.   │
+│      - Bifrost Proxy đồng bộ metadata sang catalog PostgreSQL của DUCKLAKE.    │
+│                                  │                                              │
+│                                  ▼                                              │
 │   1. ĐỌC DỮ LIỆU QUA DUCKLAKE (Read Path):                                     │
 │      - DuckDB nạp extension 'postgres' và ATTACH catalog PostgreSQL.           │
 │      - Quét bảng Bronze (ducklake.bronze_orders) với tốc độ tối đa.             │
