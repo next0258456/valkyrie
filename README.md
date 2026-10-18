@@ -84,28 +84,48 @@ result = valkyrie.execute(
 print(f"Xử lý {result.metrics['total_rows']:,} dòng trong {result.metrics['duration_ms']} ms")
 ```
 
-#### C. Ghi Bảng Apache Iceberg Silver (qua Bifrost Proxy):
+#### C. Ghi Bảng Apache Iceberg Silver (DuckLake Bronze -> Valkyrie -> Bifrost Proxy):
 ```python
+import duckdb
 import valkyrie
 from pyiceberg.catalog import load_catalog
 
-# Valkyrie thẩm định và bàn giao Arrow Table sạch
+# 1. Kết nối DuckDB và ATTACH PostgreSQL catalog của DuckLake
+con = duckdb.connect()
+con.execute("INSTALL postgres; LOAD postgres;")
+con.execute("""
+    ATTACH 'dbname=ducklake_catalog user=postgres password=postgres host=postgres-catalog port=5432' 
+    AS ducklake (TYPE POSTGRES);
+""")
+
+# 2. Valkyrie đọc dữ liệu Bronze từ DuckLake catalog và thẩm định hợp đồng
 clean_arrow, dlq_arrow = valkyrie.run(
-    sql="SELECT * FROM 's3://bronze/sales/*.parquet'",
-    contract="contract.yaml"
+    sql="SELECT * FROM ducklake.bronze_sales",
+    contract="contract.yaml",
+    connection=con,
+    write_dlq="s3://lakehouse-dlq/sales/dlq.parquet"
 )
 
-# Ghi ACID Append vào Apache Iceberg tầng Silver qua Bifrost Proxy
-catalog = load_catalog("bifrost_catalog", **{"uri": "http://bifrost:8181"})
-silver_table = catalog.load_table("silver.sales")
-silver_table.append(clean_arrow)
+# 3. Ghi ACID Append vào Apache Iceberg tầng Silver qua Bifrost Proxy
+if clean_arrow and clean_arrow.num_rows > 0:
+    catalog = load_catalog(
+        "bifrost_catalog",
+        **{
+            "uri": "http://bifrost-proxy:8181",
+            "warehouse": "s3://lakehouse-silver/warehouse",
+            "s3.endpoint": "http://minio:9000"
+        }
+    )
+    silver_table = catalog.load_table("silver.sales")
+    silver_table.append(clean_arrow)
 ```
 
 ```mermaid
 flowchart LR
-    Bronze["Bronze (S3 / Parquet)"] --> Valkyrie["Valkyrie Engine"]
+    Postgres["PostgreSQL Catalog"] -->|ATTACH POSTGRES| DuckLake["DuckLake (Bronze Tables)"]
+    DuckLake -->|Read Path| Valkyrie["Valkyrie Engine"]
     Valkyrie -->|DLQ| DLQ["DLQ (dlq.parquet)"]
-    Valkyrie -->|Clean Arrow| Bifrost["Bifrost Proxy"]
+    Valkyrie -->|Clean Arrow Table| Bifrost["Bifrost Proxy"]
     Bifrost -->|ACID Commit| Iceberg["Apache Iceberg (Silver)"]
 ```
 

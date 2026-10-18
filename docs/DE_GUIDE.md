@@ -324,7 +324,8 @@ Trong kiến trúc tổng thể **Yggdrasil Lakehouse**, Valkyrie đóng vai tr�
 
 ```mermaid
 flowchart TD
-    Bronze["Bronze Layer (Parquet / S3 / DuckLake)"] -->|Read Path| Valkyrie["Valkyrie Engine (DuckDB Single-Pass)"]
+    Postgres["PostgreSQL Catalog"] -->|ATTACH POSTGRES| DuckLake["DuckLake (Bronze Tables)"]
+    DuckLake -->|Read Path: ducklake.bronze_orders| Valkyrie["Valkyrie Engine (DuckDB Single-Pass)"]
     Valkyrie -->|Validation & Segregation| Decision{"Hợp đồng đạt chuẩn?"}
     Decision -->|Dữ liệu lỗi| DLQ["DLQ (MinIO / S3 dlq.parquet)"]
     Decision -->|Dữ liệu sạch: Arrow Table| Bifrost["Bifrost Proxy (REST Catalog / PyIceberg)"]
@@ -335,12 +336,13 @@ flowchart TD
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                           YGGDRASIL DATA PIPELINE                               │
 │                                                                                 │
-│   1. ĐỌC DỮ LIỆU (Read Path):                                                  │
-│      - DuckDB sử dụng DuckLake / httpfs extension đọc Bronze siêu tốc.         │
+│   1. ĐỌC DỮ LIỆU QUA DUCKLAKE (Read Path):                                     │
+│      - DuckDB nạp extension 'postgres' và ATTACH catalog PostgreSQL.           │
+│      - Quét bảng Bronze (ducklake.bronze_orders) với tốc độ tối đa.             │
 │                                  │                                              │
 │                                  ▼                                              │
 │   2. PHÁN XÉT (Gatekeeper Gate 1):                                              │
-│      - VALKYRIE thẩm định hợp đồng bằng Single-Pass SQL.                        │
+│      - VALKYRIE thẩm định hợp đồng bằng Single-Pass SQL CTEs.                   │
 │      - Tách Clean Data vs DLQ.                                                  │
 │                                  │                                              │
 │                 ┌────────────────┴────────────────┐                             │
@@ -356,17 +358,27 @@ flowchart TD
 #### Code Mẫu Vận Hành Của Data Engineer:
 
 ```python
+import duckdb
 import valkyrie
 from pyiceberg.catalog import load_catalog
 
-# 1. Valkyrie đọc Bronze và lọc sạch hợp đồng
+# 1. Khởi tạo DuckDB connection & ATTACH PostgreSQL catalog của DuckLake
+con = duckdb.connect()
+con.execute("INSTALL postgres; LOAD postgres;")
+con.execute("""
+    ATTACH 'dbname=ducklake_catalog user=postgres password=postgres host=postgres-catalog port=5432' 
+    AS ducklake (TYPE POSTGRES);
+""")
+
+# 2. Valkyrie đọc dữ liệu Bronze từ DuckLake catalog và thẩm định hợp đồng
 clean_arrow, dlq_arrow = valkyrie.run(
-    sql="SELECT * FROM 's3://lakehouse-bronze/orders/*.parquet'",
+    sql="SELECT * FROM ducklake.bronze_orders",
     contract="contracts/orders_contract.yaml",
+    connection=con,
     write_dlq="s3://lakehouse-dlq/orders/date=2026-10-18/dlq.parquet"
 )
 
-# 2. Ghi dữ liệu sạch trực tiếp vào Apache Iceberg tầng Silver qua Bifrost Proxy!
+# 3. Ghi dữ liệu sạch trực tiếp vào Apache Iceberg tầng Silver qua Bifrost Proxy!
 if clean_arrow and clean_arrow.num_rows > 0:
     # Kết nối Iceberg REST Catalog thông qua Bifrost Proxy
     catalog = load_catalog(
