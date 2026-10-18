@@ -84,10 +84,35 @@ result = valkyrie.execute(
 print(f"Xử lý {result.metrics['total_rows']:,} dòng trong {result.metrics['duration_ms']} ms")
 ```
 
+#### C. Ghi Bảng Apache Iceberg Silver (qua Bifrost Proxy):
+```python
+import valkyrie
+from pyiceberg.catalog import load_catalog
+
+# Valkyrie thẩm định và bàn giao Arrow Table sạch
+clean_arrow, dlq_arrow = valkyrie.run(
+    sql="SELECT * FROM 's3://bronze/sales/*.parquet'",
+    contract="contract.yaml"
+)
+
+# Ghi ACID Append vào Apache Iceberg tầng Silver qua Bifrost Proxy
+catalog = load_catalog("bifrost_catalog", **{"uri": "http://bifrost:8181"})
+silver_table = catalog.load_table("silver.sales")
+silver_table.append(clean_arrow)
+```
+
+```mermaid
+flowchart LR
+    Bronze["Bronze (S3 / Parquet)"] --> Valkyrie["Valkyrie Engine"]
+    Valkyrie -->|DLQ| DLQ["DLQ (dlq.parquet)"]
+    Valkyrie -->|Clean Arrow| Bifrost["Bifrost Proxy"]
+    Bifrost -->|ACID Commit| Iceberg["Apache Iceberg (Silver)"]
+```
+
 ---
 
 ## Tài Liệu Chi Tiết
 
-* 📖 **[Cẩm Nang Kỹ Sư Dữ Liệu (DE Guide)](docs/DE_GUIDE.md)**: Hướng dẫn chi tiết cú pháp viết contract, các trường ràng buộc, và cách vận hành trong từng môi trường (Jupyter, Airflow, S3/MinIO, CLI, Circuit Breaker).
+* 📖 **[Cẩm Nang Kỹ Sư Dữ Liệu (DE Guide)](docs/DE_GUIDE.md)**: Hướng dẫn chi tiết cú pháp viết contract, các trường ràng buộc, và cách vận hành trong từng môi trường (Jupyter, Airflow, S3/MinIO, CLI, Iceberg/Bifrost, Circuit Breaker).
 * 🏛️ **[Tài Liệu Quyết Định Kiến Trúc (ADR-0001)](docs/adr/0001-valkyrie-duckdb-sql-contract-engine.md)**: Lý do thiết kế DuckDB SQL Single-Pass Compiler và loại bỏ Anti-Join.
 * 📚 **[Thuật Ngữ Hệ Thống (GLOSSARY.md)](GLOSSARY.md)**: Định nghĩa chuẩn xác các khái niệm Clean Data, Dead-Letter Queue (DLQ), Strict Schema, Pre-flight check.

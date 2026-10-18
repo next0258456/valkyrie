@@ -316,6 +316,76 @@ Action Taken: Pipeline HALTED. DLQ preserved. Contact owner immediately!
 
 ---
 
+### Môi Trường 6: Tích Hợp Ghi Bảng Apache Iceberg Tầng Silver (Bifrost Proxy & PyIceberg)
+
+Trong kiến trúc tổng thể **Yggdrasil Lakehouse**, Valkyrie đóng vai trò là Người gác cổng (Gatekeeper). Dữ liệu sạch sau khi được thẩm định sẽ được bàn giao dưới dạng Apache Arrow Table để **Bifrost Proxy** thực hiện ACID commit vào bảng Apache Iceberg tầng Silver.
+
+#### Sơ Đồ Luồng Dữ Liệu Yggdrasil Lakehouse
+
+```mermaid
+flowchart TD
+    Bronze["Bronze Layer (Parquet / S3 / DuckLake)"] -->|Read Path| Valkyrie["Valkyrie Engine (DuckDB Single-Pass)"]
+    Valkyrie -->|Validation & Segregation| Decision{"Hợp đồng đạt chuẩn?"}
+    Decision -->|Dữ liệu lỗi| DLQ["DLQ (MinIO / S3 dlq.parquet)"]
+    Decision -->|Dữ liệu sạch: Arrow Table| Bifrost["Bifrost Proxy (REST Catalog / PyIceberg)"]
+    Bifrost -->|ACID Commit| Silver["Apache Iceberg Table (Silver Layer)"]
+```
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           YGGDRASIL DATA PIPELINE                               │
+│                                                                                 │
+│   1. ĐỌC DỮ LIỆU (Read Path):                                                  │
+│      - DuckDB sử dụng DuckLake / httpfs extension đọc Bronze siêu tốc.         │
+│                                  │                                              │
+│                                  ▼                                              │
+│   2. PHÁN XÉT (Gatekeeper Gate 1):                                              │
+│      - VALKYRIE thẩm định hợp đồng bằng Single-Pass SQL.                        │
+│      - Tách Clean Data vs DLQ.                                                  │
+│                                  │                                              │
+│                 ┌────────────────┴────────────────┐                             │
+│                 ▼                                 ▼                             │
+│   3. DỮ LIỆU SẠCH (Clean Data):     4. DỮ LIỆU RÁC (DLQ):                       │
+│      - Bàn giao Arrow Table            - Tự động ghi ra dlq.parquet             │
+│      - BIFROST PROXY nhận và ghi         trên S3/MinIO để kiểm toán.            │
+│        ACID Append vào bảng                                                     │
+│        Apache Iceberg tầng Silver!                                              │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Code Mẫu Vận Hành Của Data Engineer:
+
+```python
+import valkyrie
+from pyiceberg.catalog import load_catalog
+
+# 1. Valkyrie đọc Bronze và lọc sạch hợp đồng
+clean_arrow, dlq_arrow = valkyrie.run(
+    sql="SELECT * FROM 's3://lakehouse-bronze/orders/*.parquet'",
+    contract="contracts/orders_contract.yaml",
+    write_dlq="s3://lakehouse-dlq/orders/date=2026-10-18/dlq.parquet"
+)
+
+# 2. Ghi dữ liệu sạch trực tiếp vào Apache Iceberg tầng Silver qua Bifrost Proxy!
+if clean_arrow and clean_arrow.num_rows > 0:
+    # Kết nối Iceberg REST Catalog thông qua Bifrost Proxy
+    catalog = load_catalog(
+        "bifrost_catalog",
+        **{
+            "uri": "http://bifrost-proxy:8181",
+            "warehouse": "s3://lakehouse-silver/warehouse",
+            "s3.endpoint": "http://minio:9000",
+        }
+    )
+    
+    # Load bảng Silver và thực hiện ACID Append
+    silver_table = catalog.load_table("silver.orders")
+    silver_table.append(clean_arrow)
+    print(f"Đã commit thành công {clean_arrow.num_rows:,} dòng sạch vào Iceberg Silver!")
+```
+
+---
+
 ## 4. Tóm Tắt Các Mã Lỗi Chuẩn (Standard Error Codes)
 
 Khi các dòng vi phạm bị đẩy vào Dead-Letter Queue (DLQ), các cột metadata sau sẽ tự động được gắn vào:
