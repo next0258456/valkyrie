@@ -159,6 +159,42 @@ def _format_target_path(path: str) -> str:
     return path
 
 
+def _resolve_relation_type(
+    con: duckdb.DuckDBPyConnection,
+    sql: str,
+    materialize_arrow: bool,
+    execution_strategy: str = "auto",
+) -> str:
+    """Resolve whether to use TEMPORARY VIEW or TEMPORARY TABLE based on strategy and metadata."""
+    strat = execution_strategy.lower().strip()
+    if strat in ("view", "temporary view"):
+        return "VIEW"
+    if strat in ("table", "temporary table"):
+        return "TABLE"
+
+    # Auto strategy:
+    # 1. Zero-OOM out-of-core pipeline (materialize_arrow is False) -> VIEW (Zero memory overhead)
+    if not materialize_arrow:
+        return "VIEW"
+
+    # 2. Check if parquet file or source has large row count (> 5,000,000)
+    try:
+        parquet_matches = re.findall(r"['\"]([^'\"]+\.parquet)['\"]", sql)
+        if parquet_matches:
+            target_file = parquet_matches[0]
+            if Path(target_file).exists():
+                row_count = con.execute(
+                    f"SELECT SUM(num_rows) FROM parquet_metadata('{target_file}')"
+                ).fetchone()[0]
+                if row_count and row_count > 5_000_000:
+                    return "VIEW"
+    except Exception:
+        pass
+
+    # 3. Default for small/medium interactive in-memory execution -> TABLE (Single-pass materialize in RAM)
+    return "TABLE"
+
+
 def run(
     sql: str,
     contract: Union[str, Path, ValkyrieContract],
@@ -167,6 +203,7 @@ def run(
     raise_on_breach: bool = True,
     connection: Optional[duckdb.DuckDBPyConnection] = None,
     materialize_arrow: bool = True,
+    execution_strategy: str = "auto",
 ) -> ValidationResult:
     """Execute single-pass validation on a source SQL query against a Valkyrie contract."""
     if not isinstance(contract, ValkyrieContract):
@@ -178,9 +215,12 @@ def run(
     validate_preflight_schema(con, sql, contract)
     annotated_sql = compile_to_sql(contract, sql)
 
+    # Adaptive strategy: auto-select VIEW vs TABLE based on metadata and execution mode
+    rel_type = _resolve_relation_type(con, sql, materialize_arrow, execution_strategy)
+
     start_time = time.perf_counter()
     try:
-        con.execute(f"CREATE TEMPORARY TABLE _valkyrie_annotated AS {annotated_sql}")
+        con.execute(f"CREATE TEMPORARY {rel_type} _valkyrie_annotated AS {annotated_sql}")
 
         # Compute metrics directly in DuckDB SQL
         metrics_row = con.execute(
@@ -229,6 +269,7 @@ def run(
             "max_error_rate": contract.policies.max_error_rate,
             "quarantine_action": contract.policies.quarantine_action,
             "breach_reason": breach_reason if is_breached else "",
+            "execution_strategy": rel_type,
         }
 
         # Handle breach
@@ -270,7 +311,7 @@ def run(
             dlq_arrow = None
 
     finally:
-        con.execute("DROP TABLE IF EXISTS _valkyrie_annotated")
+        con.execute(f"DROP {rel_type} IF EXISTS _valkyrie_annotated")
 
     return ValidationResult(
         clean_arrow=clean_arrow,
@@ -287,6 +328,7 @@ def execute(
     write_clean: Optional[str] = None,
     write_dlq: Optional[str] = None,
     connection: Optional[duckdb.DuckDBPyConnection] = None,
+    execution_strategy: str = "auto",
 ) -> ValidationResult:
     """Execute validation and safely persist outputs directly using DuckDB COPY in zero-OOM Out-of-Core mode."""
     return run(
@@ -297,4 +339,5 @@ def execute(
         raise_on_breach=True,
         connection=connection,
         materialize_arrow=False,
+        execution_strategy=execution_strategy,
     )

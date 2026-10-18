@@ -412,3 +412,25 @@ def test_validation_result_dataframe_aliases(valid_contract_yaml):
     assert result.dlq_df.num_rows == 0
 
 
+def test_adaptive_execution_strategy(valid_contract_yaml, tmp_path):
+    """Engine dynamically picks TABLE for small in-memory and VIEW for streaming/out-of-core."""
+    sql = "SELECT 1 AS order_id, 'CUST-001' AS customer_id, 'NEW' AS status, 10.0 AS amount"
+
+    # 1. Default run() with small query picks TABLE
+    res_run = run(sql=sql, contract=valid_contract_yaml)
+    assert res_run.metrics["execution_strategy"] == "TABLE"
+
+    # 2. execute() in streaming mode picks VIEW
+    clean_out = str(tmp_path / "clean.parquet")
+    res_exec = execute(sql=sql, contract=valid_contract_yaml, write_clean=clean_out)
+    assert res_exec.metrics["execution_strategy"] == "VIEW"
+
+    # 3. Explicit override works
+    res_view_override = run(sql=sql, contract=valid_contract_yaml, execution_strategy="view")
+    assert res_view_override.metrics["execution_strategy"] == "VIEW"
+
+    res_table_override = execute(sql=sql, contract=valid_contract_yaml, write_clean=clean_out, execution_strategy="table")
+    assert res_table_override.metrics["execution_strategy"] == "TABLE"
+
+
+
