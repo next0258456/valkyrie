@@ -1,9 +1,11 @@
-"""Contract schema definition and parser for Valkyrie using Python standard library dataclasses."""
+"""Contract schema definition and parser for Valkyrie."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 import yaml
+
+PROHIBITED_FLUFF_KEYS = {"sla", "team", "pricing", "description", "business_logic"}
 
 
 @dataclass
@@ -18,17 +20,16 @@ class ColumnContract:
     type: str = "VARCHAR"
     not_null: bool = False
     unique: bool = False
-    range: Optional[RangeConstraint] = None
+    range: Optional[tuple] = None  # (min, max)
     enum: Optional[List[Any]] = None
     pattern: Optional[str] = None
-    quality: Optional[List[Dict[str, Any]]] = None
 
 
 @dataclass
 class PolicyConfig:
     strict_schema: bool = True
     max_error_rate: float = 0.05
-    quarantine_action: Literal["DLQ", "FAIL_FAST"] = "DLQ"
+    quarantine_action: str = "DLQ"
 
 
 @dataclass
@@ -49,13 +50,13 @@ class ValkyrieContract:
 
 
 def parse_range(r_val: Any) -> Optional[RangeConstraint]:
-    """Parse range constraint from either list/tuple [min, max] or dict {min, max}."""
+    """Parse range from [min, max] or {min: x, max: y} into RangeConstraint."""
     if r_val is None:
         return None
     if isinstance(r_val, (list, tuple)):
         if len(r_val) != 2:
             raise ValueError(f"Range list must contain exactly 2 numbers [min, max], got: {r_val}")
-        return RangeConstraint(min=float(r_val[0]), max=float(r_val[1]))
+        return RangeConstraint(min=float(r_val[0]) if r_val[0] is not None else None, max=float(r_val[1]) if r_val[1] is not None else None)
     if isinstance(r_val, dict):
         min_v = float(r_val["min"]) if r_val.get("min") is not None else None
         max_v = float(r_val["max"]) if r_val.get("max") is not None else None
@@ -66,10 +67,7 @@ def parse_range(r_val: Any) -> Optional[RangeConstraint]:
 def load_contract(source: Union[str, Path, Dict[str, Any]]) -> ValkyrieContract:
     """Load and validate a Valkyrie YAML contract file or dictionary."""
     if isinstance(source, (str, Path)):
-        path = Path(source)
-        if not path.exists():
-            raise FileNotFoundError(f"Contract file not found: {source}")
-        with open(path, "r", encoding="utf-8") as f:
+        with open(source, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
     elif isinstance(source, dict):
         data = source
@@ -79,25 +77,22 @@ def load_contract(source: Union[str, Path, Dict[str, Any]]) -> ValkyrieContract:
     if not isinstance(data, dict):
         raise ValueError("Contract YAML must be a mapping dictionary")
 
-    # Validate dataset
-    dataset = data.get("dataset")
-    if not dataset or not str(dataset).strip():
-        raise ValueError("Contract must declare a non-empty 'dataset' name")
+    # Reject prohibited fluff
+    for key in data:
+        if key.lower() in PROHIBITED_FLUFF_KEYS:
+            raise ValueError(f"Prohibited non-executable prose/fluff key '{key}' detected in contract.")
 
-    # Validate owner
-    owner = data.get("owner")
-    if not owner or not str(owner).strip():
+    dataset = str(data.get("dataset", "")).strip()
+    owner = str(data.get("owner", "")).strip()
+    if not dataset:
+        raise ValueError("Contract must declare a non-empty 'dataset' name")
+    if not owner:
         raise ValueError("Contract must declare a non-empty 'owner' for accountability")
 
-    version = data.get("version", "v1")
-
-    # Policies
     pol_data = data.get("policies") or {}
     quarantine_action = pol_data.get("quarantine_action", "DLQ")
     if quarantine_action not in ("DLQ", "FAIL_FAST"):
-        raise ValueError(
-            f"Invalid quarantine_action '{quarantine_action}'. Must be either 'DLQ' or 'FAIL_FAST'"
-        )
+        raise ValueError(f"Invalid quarantine_action '{quarantine_action}'. Must be 'DLQ' or 'FAIL_FAST'")
 
     policies = PolicyConfig(
         strict_schema=bool(pol_data.get("strict_schema", True)),
@@ -105,51 +100,37 @@ def load_contract(source: Union[str, Path, Dict[str, Any]]) -> ValkyrieContract:
         quarantine_action=quarantine_action,
     )
 
-    # Columns
-    schema_cols: List[ColumnContract] = []
-    raw_schema = data.get("schema") or []
-    for col_def in raw_schema:
-        col_name = col_def.get("name")
-        if not col_name:
+    schema_cols = []
+    for col_def in (data.get("schema") or []):
+        name = col_def.get("name")
+        if not name:
             raise ValueError("Each column in schema must have a 'name'")
+        # Reject prose quality rules
+        for q in (col_def.get("quality") or []):
+            if str(q.get("type", "")).lower() in ("text", "description", "prose"):
+                raise ValueError(f"Non-executable prose rule detected in column '{name}'.")
 
-        quality_rules = col_def.get("quality")
-        if quality_rules:
-            for rule in quality_rules:
-                rule_type = rule.get("type", "").lower()
-                if rule_type in ("text", "description", "prose"):
-                    raise ValueError(
-                        f"Non-executable prose rule detected in column '{col_name}'. "
-                        "Valkyrie only accepts machine-verifiable rules."
-                    )
-
-        range_constraint = parse_range(col_def.get("range"))
-
-        col = ColumnContract(
-            name=col_name,
-            type=str(col_def.get("type", "VARCHAR")),
-            not_null=bool(col_def.get("not_null", False)),
-            unique=bool(col_def.get("unique", False)),
-            range=range_constraint,
-            enum=col_def.get("enum"),
-            pattern=col_def.get("pattern"),
-            quality=quality_rules,
+        schema_cols.append(
+            ColumnContract(
+                name=name,
+                type=str(col_def.get("type", "VARCHAR")),
+                not_null=bool(col_def.get("not_null", False)),
+                unique=bool(col_def.get("unique", False)),
+                range=parse_range(col_def.get("range")),
+                enum=col_def.get("enum"),
+                pattern=col_def.get("pattern"),
+            )
         )
-        schema_cols.append(col)
 
-    # Custom rules
-    custom_rules: List[CustomRule] = []
-    raw_rules = data.get("custom_rules") or []
-    for r_def in raw_rules:
-        r_name = r_def.get("name", "custom_rule")
-        r_expr = r_def.get("expression", "")
-        r_code = r_def.get("error_code")
-        custom_rules.append(CustomRule(name=r_name, expression=r_expr, error_code=r_code))
+    custom_rules = [
+        CustomRule(name=r.get("name", "custom_rule"), expression=r.get("expression", ""), error_code=r.get("error_code"))
+        for r in (data.get("custom_rules") or [])
+    ]
 
     return ValkyrieContract(
-        dataset=str(dataset),
-        owner=str(owner),
-        version=str(version),
+        dataset=dataset,
+        owner=owner,
+        version=str(data.get("version", "v1")),
         policies=policies,
         schema_=schema_cols,
         custom_rules=custom_rules,
