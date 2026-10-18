@@ -37,13 +37,11 @@ def compile_to_sql(contract: ValkyrieContract, source_sql: str) -> str:
 
         # 3. RANGE constraint
         if col.range:
-            min_v = col.range[0] if isinstance(col.range, tuple) else getattr(col.range, "min", None)
-            max_v = col.range[1] if isinstance(col.range, tuple) else getattr(col.range, "max", None)
             parts = []
-            if min_v is not None:
-                parts.append(f'"{col.name}" < {min_v}')
-            if max_v is not None:
-                parts.append(f'"{col.name}" > {max_v}')
+            if col.range.min is not None:
+                parts.append(f'"{col.name}" < {col.range.min}')
+            if col.range.max is not None:
+                parts.append(f'"{col.name}" > {col.range.max}')
             if parts:
                 cond = " OR ".join(parts)
                 code = "ERR_OUT_OF_RANGE"

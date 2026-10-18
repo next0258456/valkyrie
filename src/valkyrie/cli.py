@@ -20,10 +20,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--write-clean", required=False, help="Target Parquet path for clean data")
     run_parser.add_argument("--write-dlq", required=False, help="Target Parquet path for DLQ data")
 
-    # Command: to-sql
-    sql_parser = subparsers.add_parser("to-sql", help="Compile contract to a DuckDB SQL query string")
-    sql_parser.add_argument("--contract", required=True, help="Path to contract YAML file")
-    sql_parser.add_argument("--sql", required=True, help="Input SQL query")
+    # Command: compile (primary, as per spec) & to-sql (alias)
+    for cmd_name in ("compile", "to-sql"):
+        sql_parser = subparsers.add_parser(cmd_name, help="Compile contract to a DuckDB SQL query string")
+        sql_parser.add_argument("--contract", required=True, help="Path to contract YAML file")
+        sql_parser.add_argument("--sql", required=True, help="Input SQL query")
 
     return parser
 
@@ -79,7 +80,7 @@ def main() -> None:
             print(f"Error executing contract: {e}", file=sys.stderr)
             sys.exit(2)
 
-    elif args.command == "to-sql":
+    elif args.command in ("compile", "to-sql"):
         try:
             sql_out = to_sql(contract=args.contract, source_sql=args.sql)
             print(sql_out)

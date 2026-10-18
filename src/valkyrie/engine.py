@@ -20,8 +20,8 @@ class ValidationResult:
 
     def __init__(
         self,
-        clean_arrow: pa.Table,
-        dlq_arrow: pa.Table,
+        clean_arrow: Optional[pa.Table],
+        dlq_arrow: Optional[pa.Table],
         metrics: Dict[str, Any],
         owner: str,
         is_passed: bool,
@@ -32,26 +32,10 @@ class ValidationResult:
         self.owner = owner
         self.is_passed = is_passed
 
-    def __iter__(self) -> Iterator[pa.Table]:
+    def __iter__(self) -> Iterator[Optional[pa.Table]]:
         """Support unpacking like a tuple: clean_arrow, dlq_arrow = result."""
         yield self.clean_arrow
         yield self.dlq_arrow
-
-    @property
-    def clean_df(self):
-        try:
-            import polars as pl
-            return pl.from_arrow(self.clean_arrow)
-        except ImportError:
-            return self.clean_arrow.to_pandas()
-
-    @property
-    def dlq_df(self):
-        try:
-            import polars as pl
-            return pl.from_arrow(self.dlq_arrow)
-        except ImportError:
-            return self.dlq_arrow.to_pandas()
 
 
 def to_sql(contract: Union[str, Path, ValkyrieContract], source_sql: str) -> str:
@@ -59,6 +43,28 @@ def to_sql(contract: Union[str, Path, ValkyrieContract], source_sql: str) -> str
     if not isinstance(contract, ValkyrieContract):
         contract = load_contract(contract)
     return compile_to_sql(contract, source_sql)
+
+
+def _classify_type(type_str: str) -> str:
+    """Classify physical DuckDB / SQL type into general semantic family."""
+    t = type_str.strip().upper()
+    if t.startswith("STRUCT"):
+        return "STRUCT"
+    if t.endswith("[]") or t.startswith("LIST") or t.startswith("ARRAY"):
+        return "LIST"
+    if "TIMESTAMP" in t or "DATETIME" in t:
+        return "TIMESTAMP"
+    if t in ("DATE",):
+        return "DATE"
+    if t in ("TIME",):
+        return "TIME"
+    if t in ("BOOLEAN", "BOOL"):
+        return "BOOLEAN"
+    if any(t.startswith(num) for num in ("BIGINT", "INT", "SMALLINT", "TINYINT", "DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC", "HUGEINT")):
+        return "NUMERIC"
+    if any(t.startswith(st) for st in ("VARCHAR", "TEXT", "STRING", "CHAR", "BPCHAR")):
+        return "STRING"
+    return t.split("(")[0].strip()
 
 
 def validate_preflight_schema(
@@ -87,21 +93,12 @@ def validate_preflight_schema(
             )
 
     # 3. Physical type compatibility
-    type_categories = {
-        "BIGINT": "NUMERIC", "INTEGER": "NUMERIC", "INT": "NUMERIC", "SMALLINT": "NUMERIC", "TINYINT": "NUMERIC",
-        "DOUBLE": "NUMERIC", "FLOAT": "NUMERIC", "REAL": "NUMERIC", "DECIMAL": "NUMERIC", "NUMERIC": "NUMERIC",
-        "VARCHAR": "STRING", "TEXT": "STRING", "STRING": "STRING",
-        "BOOLEAN": "BOOLEAN", "BOOL": "BOOLEAN",
-        "DATE": "DATE", "TIMESTAMP": "TIMESTAMP", "TIME": "TIME",
-    }
     for col in contract.schema_:
-        col_type = col.type.split("(")[0].strip().upper()
-        col_cat = type_categories.get(col_type)
+        contract_cat = _classify_type(col.type)
         actual_raw_type = source_types.get(col.name.lower(), "")
-        actual_type = actual_raw_type.split("(")[0].strip().upper()
-        actual_cat = type_categories.get(actual_type)
+        actual_cat = _classify_type(actual_raw_type)
 
-        if col_cat and actual_cat and col_cat != actual_cat:
+        if contract_cat and actual_cat and contract_cat != actual_cat:
             raise SchemaConformanceException(
                 f"[ERR_SCHEMA_TYPE_MISMATCH] Column '{col.name}' declared as {col.type} but source query produces incompatible type {actual_raw_type}"
             )
@@ -153,6 +150,7 @@ def run(
     write_dlq: Optional[str] = None,
     raise_on_breach: bool = True,
     connection: Optional[duckdb.DuckDBPyConnection] = None,
+    materialize_arrow: bool = True,
 ) -> ValidationResult:
     """Execute single-pass validation on a source SQL query against a Valkyrie contract."""
     if not isinstance(contract, ValkyrieContract):
@@ -239,11 +237,15 @@ def run(
                 f"FROM _valkyrie_annotated WHERE _error_code IS NULL) TO '{dest_clean}' (FORMAT PARQUET)"
             )
 
-        clean_arrow = con.execute(
-            "SELECT * EXCLUDE (_error_code, _error_column, _raw_value, _ingestion_timestamp) "
-            "FROM _valkyrie_annotated WHERE _error_code IS NULL"
-        ).to_arrow_table()
-        dlq_arrow = con.execute("SELECT * FROM _valkyrie_annotated WHERE _error_code IS NOT NULL").to_arrow_table()
+        if materialize_arrow:
+            clean_arrow = con.execute(
+                "SELECT * EXCLUDE (_error_code, _error_column, _raw_value, _ingestion_timestamp) "
+                "FROM _valkyrie_annotated WHERE _error_code IS NULL"
+            ).to_arrow_table()
+            dlq_arrow = con.execute("SELECT * FROM _valkyrie_annotated WHERE _error_code IS NOT NULL").to_arrow_table()
+        else:
+            clean_arrow = None
+            dlq_arrow = None
 
     finally:
         con.execute("DROP TABLE IF EXISTS _valkyrie_annotated")
@@ -278,7 +280,7 @@ def execute(
     write_dlq: Optional[str] = None,
     connection: Optional[duckdb.DuckDBPyConnection] = None,
 ) -> ValidationResult:
-    """Execute validation and safely persist outputs directly using DuckDB COPY."""
+    """Execute validation and safely persist outputs directly using DuckDB COPY in zero-OOM Out-of-Core mode."""
     return run(
         sql=sql,
         contract=contract,
@@ -286,4 +288,5 @@ def execute(
         write_dlq=write_dlq,
         raise_on_breach=True,
         connection=connection,
+        materialize_arrow=False,
     )

@@ -29,17 +29,6 @@ def format_breach_banner(
     )
 
 
-def extract_top_violations(dlq_arrow: Any, limit: int = 3) -> list:
-    """Extract top error violation codes from DLQ Arrow table."""
-    if dlq_arrow is None or getattr(dlq_arrow, "num_rows", 0) == 0:
-        return []
-    if hasattr(dlq_arrow, "column_names") and "_error_code" in dlq_arrow.column_names:
-        import collections
-        code_counts = collections.Counter(dlq_arrow.column("_error_code").to_pylist())
-        return [f"  - [{code}]: {count:,} rows" for code, count in code_counts.most_common(limit)]
-    return []
-
-
 class SchemaConformanceException(Exception):
     """Exception raised when raw data schema does not conform to the data contract."""
     pass

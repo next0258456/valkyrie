@@ -20,7 +20,7 @@ class ColumnContract:
     type: str = "VARCHAR"
     not_null: bool = False
     unique: bool = False
-    range: Optional[tuple] = None  # (min, max)
+    range: Optional[RangeConstraint] = None
     enum: Optional[List[Any]] = None
     pattern: Optional[str] = None
 

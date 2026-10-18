@@ -221,7 +221,14 @@ def test_cli_execution(valid_contract_yaml, monkeypatch, capsys):
     from valkyrie.cli import main
     import sys
 
-    # CLI to-sql
+    # CLI compile (spec primary)
+    monkeypatch.setattr(sys, "argv", ["valkyrie", "compile", "--contract", valid_contract_yaml, "--sql", "SELECT 1"])
+    with pytest.raises(SystemExit) as e:
+        main()
+    assert e.value.code == 0
+    assert "WITH raw AS" in capsys.readouterr().out
+
+    # CLI to-sql (spec alias)
     monkeypatch.setattr(sys, "argv", ["valkyrie", "to-sql", "--contract", valid_contract_yaml, "--sql", "SELECT 1"])
     with pytest.raises(SystemExit) as e:
         main()
@@ -235,3 +242,31 @@ def test_cli_execution(valid_contract_yaml, monkeypatch, capsys):
         main()
     assert e.value.code == 0
     assert "PASSED ✅" in capsys.readouterr().out
+
+
+def test_execute_zero_oom_clean_arrow_is_none(tmp_path, valid_contract_yaml):
+    """execute() streams directly to disk without loading full Arrow table into Python RAM."""
+    clean_path = tmp_path / "clean_oom.parquet"
+    sql = "SELECT 1 AS order_id, 'CUST-001' AS customer_id, 'NEW' AS status, 10.0 AS amount"
+    result = execute(
+        sql=sql,
+        contract=valid_contract_yaml,
+        write_clean=str(clean_path),
+    )
+    assert result.is_passed is True
+    # Zero-OOM guarantee: clean_arrow is not materialized in memory during disk-to-disk execute
+    assert result.clean_arrow is None
+    assert clean_path.exists()
+    assert pq.read_table(clean_path).num_rows == 1
+
+
+def test_preflight_complex_type_mismatch():
+    """Verify preflight rejects complex type mismatch (e.g. STRUCT declared but INT given)."""
+    contract = {
+        "dataset": "nested",
+        "owner": "eng@valkyrie.local",
+        "schema": [{"name": "meta", "type": "STRUCT(id INT)"}],
+    }
+    sql = "SELECT 123 AS meta"  # meta is INTEGER, not STRUCT!
+    with pytest.raises(SchemaConformanceException, match="ERR_SCHEMA_TYPE_MISMATCH"):
+        run(sql=sql, contract=contract)
