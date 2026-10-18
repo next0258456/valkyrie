@@ -66,6 +66,8 @@ schema:
   - name: "order_total"
     type: "DOUBLE"
     not_null: true
+  - name: "line_items"
+    type: "STRUCT(price DOUBLE)[]"
 custom_rules:
   - name: "order_total_matches_items"
     expression: "order_total == list_sum(line_items.price)"

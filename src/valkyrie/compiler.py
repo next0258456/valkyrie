@@ -4,6 +4,17 @@ from typing import List, Tuple
 from valkyrie.contract import ValkyrieContract
 
 
+def build_case_when(branches: List[Tuple[str, str]], default: str = "NULL") -> str:
+    """Build a SQL CASE WHEN statement from a list of (condition, value_expr) pairs."""
+    if not branches:
+        return default
+    lines = ["CASE"]
+    for cond, val in branches:
+        lines.append(f"            WHEN {cond} THEN {val}")
+    lines.append(f"            ELSE {default}\n        END")
+    return "\n".join(lines)
+
+
 def compile_to_sql(contract: ValkyrieContract, source_sql: str) -> str:
     """Compile contract validation rules into a single-pass DuckDB SQL query."""
     clean_source = source_sql.strip().rstrip(";")
@@ -77,17 +88,9 @@ def compile_to_sql(contract: ValkyrieContract, source_sql: str) -> str:
         col_cases = "NULL"
         raw_cases = "NULL"
     else:
-        code_cases = "CASE\n" + "\n".join(
-            f"            WHEN {cond} THEN '{code}'" for cond, code, _, _ in rules
-        ) + "\n            ELSE NULL\n        END"
-
-        col_cases = "CASE\n" + "\n".join(
-            f"            WHEN {cond} THEN '{col_name}'" for cond, _, col_name, _ in rules
-        ) + "\n            ELSE NULL\n        END"
-
-        raw_cases = "CASE\n" + "\n".join(
-            f"            WHEN {cond} THEN {raw_expr}" for cond, _, _, raw_expr in rules
-        ) + "\n            ELSE NULL\n        END"
+        code_cases = build_case_when([(cond, f"'{code}'") for cond, code, _, _ in rules])
+        col_cases = build_case_when([(cond, f"'{col_name}'") for cond, _, col_name, _ in rules])
+        raw_cases = build_case_when([(cond, raw_expr) for cond, _, _, raw_expr in rules])
 
     compiled_sql = f"""WITH raw AS (
     {clean_source}

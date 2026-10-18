@@ -2,7 +2,7 @@
 
 from valkyrie.contract import ValkyrieContract, load_contract
 from valkyrie.engine import execute, run, to_sql
-from valkyrie.exceptions import ContractBreachException
+from valkyrie.exceptions import ContractBreachException, SchemaConformanceException
 
 __all__ = [
     "ValkyrieContract",
@@ -11,4 +11,5 @@ __all__ = [
     "execute",
     "to_sql",
     "ContractBreachException",
+    "SchemaConformanceException",
 ]

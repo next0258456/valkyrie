@@ -7,7 +7,12 @@ import pyarrow as pa
 
 from valkyrie.contract import ValkyrieContract, load_contract
 from valkyrie.compiler import compile_to_sql
-from valkyrie.exceptions import ContractBreachException
+from valkyrie.exceptions import (
+    ContractBreachException,
+    SchemaConformanceException,
+    format_breach_banner,
+    extract_top_violations,
+)
 
 
 class ValidationResult:
@@ -66,6 +71,34 @@ def to_sql(contract: Union[str, Path, ValkyrieContract], source_sql: str) -> str
     return compile_to_sql(contract, source_sql)
 
 
+def validate_preflight_schema(
+    con: duckdb.DuckDBPyConnection,
+    source_sql: str,
+    contract: ValkyrieContract,
+) -> None:
+    """Inspect query schema metadata prior to heavy query execution."""
+    clean_sql = source_sql.strip().rstrip(";")
+    rel = con.sql(clean_sql)
+    source_cols = {col.lower(): col for col in rel.columns}
+
+    # 1. Check missing mandatory columns
+    missing_cols = []
+    for col in contract.schema_:
+        if col.not_null and col.name.lower() not in source_cols:
+            missing_cols.append(col.name)
+    if missing_cols:
+        raise SchemaConformanceException(f"Missing mandatory column(s): {missing_cols}")
+
+    # 2. Check unexpected columns if strict_schema is True
+    if contract.policies.strict_schema:
+        contract_keys = {c.name.lower() for c in contract.schema_}
+        extra_cols = [orig for low, orig in source_cols.items() if low not in contract_keys]
+        if extra_cols:
+            raise SchemaConformanceException(
+                f"Unexpected columns found under strict_schema: {extra_cols}"
+            )
+
+
 def run(
     sql: str,
     contract: Union[str, Path, ValkyrieContract],
@@ -78,39 +111,38 @@ def run(
 
     con = connection or duckdb.connect()
 
-    # Compile SQL with single-pass annotation
+    # Pre-flight schema validation
+    validate_preflight_schema(con, sql, contract)
+
     annotated_sql = compile_to_sql(contract, sql)
 
-    # Register annotated relation
-    con.execute(f"CREATE OR REPLACE TEMPORARY VIEW _valkyrie_annotated AS {annotated_sql}")
+    import time
+    start_time = time.perf_counter()
 
-    # 1. Clean Data: select all columns except internal diagnostic columns where _error_code IS NULL
-    clean_sql = (
-        "SELECT * EXCLUDE (_error_code, _error_column, _raw_value, _ingestion_timestamp) "
-        "FROM _valkyrie_annotated WHERE _error_code IS NULL"
-    )
-    clean_arrow = con.execute(clean_sql).to_arrow_table()
+    try:
+        # Create materialized temporary table (Single-Pass execution)
+        con.execute(f"CREATE TEMPORARY TABLE _valkyrie_annotated AS {annotated_sql}")
 
-    # 2. DLQ Data: select all columns where _error_code IS NOT NULL
-    dlq_sql = "SELECT * FROM _valkyrie_annotated WHERE _error_code IS NOT NULL"
-    dlq_arrow = con.execute(dlq_sql).to_arrow_table()
+        # 1. Clean Data: select all columns except internal diagnostic columns where _error_code IS NULL
+        clean_sql = (
+            "SELECT * EXCLUDE (_error_code, _error_column, _raw_value, _ingestion_timestamp) "
+            "FROM _valkyrie_annotated WHERE _error_code IS NULL"
+        )
+        clean_arrow = con.execute(clean_sql).to_arrow_table()
+
+        # 2. DLQ Data: select all columns where _error_code IS NOT NULL
+        dlq_sql = "SELECT * FROM _valkyrie_annotated WHERE _error_code IS NOT NULL"
+        dlq_arrow = con.execute(dlq_sql).to_arrow_table()
+    finally:
+        con.execute("DROP TABLE IF EXISTS _valkyrie_annotated")
+
+    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
     # Metrics
     clean_rows = clean_arrow.num_rows
     error_rows = dlq_arrow.num_rows
     total_rows = clean_rows + error_rows
     error_rate = (error_rows / total_rows) if total_rows > 0 else 0.0
-
-    metrics = {
-        "dataset": contract.dataset,
-        "owner": contract.owner,
-        "total_rows": total_rows,
-        "clean_rows": clean_rows,
-        "error_rows": error_rows,
-        "error_rate": error_rate,
-        "max_error_rate": contract.policies.max_error_rate,
-        "quarantine_action": contract.policies.quarantine_action,
-    }
 
     # Check circuit breaker
     is_breached = False
@@ -123,28 +155,32 @@ def run(
         is_breached = True
         breach_reason = f"Error rate {error_rate:.2%} exceeded threshold {contract.policies.max_error_rate:.2%}."
 
+    metrics = {
+        "dataset": contract.dataset,
+        "owner": contract.owner,
+        "total_rows": total_rows,
+        "clean_rows": clean_rows,
+        "error_rows": error_rows,
+        "error_rate": error_rate,
+        "duration_ms": duration_ms,
+        "max_error_rate": contract.policies.max_error_rate,
+        "quarantine_action": contract.policies.quarantine_action,
+        "breach_reason": breach_reason if is_breached else "",
+    }
+
     is_passed = not is_breached
 
     if is_breached and raise_on_breach:
-        top_violations = []
-        if error_rows > 0 and "_error_code" in dlq_arrow.column_names:
-            import collections
-            code_counts = collections.Counter(dlq_arrow.column("_error_code").to_pylist())
-            for code, count in code_counts.most_common(3):
-                top_violations.append(f"  - [{code}]: {count:,} rows")
-        violations_str = "\n".join(top_violations) if top_violations else "  - None"
-
-        msg = (
-            f"\n{'=' * 80}\n"
-            f"🔥 [VALKYRIE] DATA CONTRACT BREACH DETECTED!\n"
-            f"Dataset     : {contract.dataset}\n"
-            f"Owner       : {contract.owner}\n"
-            f"Threshold   : max_error_rate = {contract.policies.max_error_rate:.2%}\n"
-            f"Actual Error: {error_rate:.2%} ({error_rows:,} / {total_rows:,} rows)\n"
-            f"Top Violations:\n{violations_str}\n"
-            f"Reason      : {breach_reason}\n"
-            f"Action Taken: Pipeline HALTED. DLQ preserved. Contact owner immediately!\n"
-            f"{'=' * 80}"
+        top_violations = extract_top_violations(dlq_arrow)
+        msg = format_breach_banner(
+            dataset=contract.dataset,
+            owner=contract.owner,
+            max_error_rate=contract.policies.max_error_rate,
+            error_rate=error_rate,
+            error_rows=error_rows,
+            total_rows=total_rows,
+            breach_reason=breach_reason,
+            top_violations=top_violations,
         )
         raise ContractBreachException(
             message=msg,
@@ -197,6 +233,31 @@ def configure_cloud_storage(con: duckdb.DuckDBPyConnection, *targets: str) -> No
         con.execute(f"CREATE OR REPLACE SECRET s3_valkyrie ({', '.join(params)})")
 
 
+def _duckdb_export_parquet(con: duckdb.DuckDBPyConnection, table: pa.Table, path: str) -> None:
+    """Persist Arrow table to Parquet file natively through DuckDB."""
+    is_cloud = (
+        path.startswith("s3://")
+        or path.startswith("minio://")
+        or path.startswith("http://")
+        or path.startswith("https://")
+    )
+    if not is_cloud:
+        target_path = str(Path(path).resolve()).replace("\\", "/")
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    else:
+        target_path = path
+
+    temp_view_name = f"_valkyrie_export_{abs(id(table))}"
+    con.register(temp_view_name, table)
+    try:
+        con.execute(f"COPY {temp_view_name} TO '{target_path}' (FORMAT PARQUET)")
+    finally:
+        try:
+            con.unregister(temp_view_name)
+        except Exception:
+            pass
+
+
 def execute(
     sql: str,
     contract: Union[str, Path, ValkyrieContract],
@@ -215,18 +276,32 @@ def execute(
 
     # Persist DLQ if requested and records failed
     if write_dlq and result.dlq_arrow.num_rows > 0:
-        import pyarrow.parquet as pq
-        pq.write_table(result.dlq_arrow, write_dlq)
+        _duckdb_export_parquet(con, result.dlq_arrow, write_dlq)
 
-    # If breach occurred, re-trigger the breach exception with alert banner
+    # If breach occurred, raise ContractBreachException directly without rescanning
     if not result.is_passed:
-        # Calling run with raise_on_breach=True triggers the exact exception
-        run(sql=sql, contract=contract, raise_on_breach=True, connection=con)
+        top_violations = extract_top_violations(result.dlq_arrow)
+        breach_reason = result.metrics.get("breach_reason") or "Data contract breach threshold exceeded."
+        msg = format_breach_banner(
+            dataset=result.metrics["dataset"],
+            owner=result.owner,
+            max_error_rate=result.metrics["max_error_rate"],
+            error_rate=result.metrics["error_rate"],
+            error_rows=result.metrics["error_rows"],
+            total_rows=result.metrics["total_rows"],
+            breach_reason=breach_reason,
+            top_violations=top_violations,
+        )
+        raise ContractBreachException(
+            message=msg,
+            metrics=result.metrics,
+            dlq_df=result.dlq_arrow,
+            owner=result.owner,
+        )
 
     # Persist Clean data if passed
     if write_clean:
-        import pyarrow.parquet as pq
-        pq.write_table(result.clean_arrow, write_clean)
+        _duckdb_export_parquet(con, result.clean_arrow, write_clean)
 
     return result
 
