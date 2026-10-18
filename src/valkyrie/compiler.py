@@ -1,5 +1,6 @@
 """Valkyrie SQL compiler: compiles YAML contracts to DuckDB SQL CTEs."""
 
+import re
 from typing import List, Tuple
 from valkyrie.contract import ValkyrieContract
 
@@ -69,7 +70,6 @@ def compile_to_sql(contract: ValkyrieContract, source_sql: str) -> str:
             rules.append((cond, code, col.name, f'CAST("{col.name}" AS VARCHAR)'))
 
     # 6. CUSTOM RULES (Cross-column & Nested List expressions)
-    import re
     for rule in contract.custom_rules:
         expr_clean = rule.expression.strip()
         # Automatically rewrite shorthand list_sum(col.field) to DuckDB lambda list_sum(list_transform(col, x -> x.field))

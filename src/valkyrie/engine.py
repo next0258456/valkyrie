@@ -38,6 +38,16 @@ class ValidationResult:
         yield self.clean_arrow
         yield self.dlq_arrow
 
+    @property
+    def clean_df(self) -> Optional[pa.Table]:
+        """Convenience alias matching GLOSSARY.md for interactive callers."""
+        return self.clean_arrow
+
+    @property
+    def dlq_df(self) -> Optional[pa.Table]:
+        """Convenience alias matching GLOSSARY.md for interactive callers."""
+        return self.dlq_arrow
+
 
 def to_sql(contract: Union[str, Path, ValkyrieContract], source_sql: str) -> str:
     """Compile a contract and source SQL query to DuckDB SQL without executing."""

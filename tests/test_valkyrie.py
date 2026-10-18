@@ -386,3 +386,29 @@ def test_contract_rejects_empty_schema_and_empty_expression(tmp_path):
     with pytest.raises(ValueError, match="non-empty 'expression'"):
         load_contract(p2)
 
+
+def test_range_dict_invalid_keys(tmp_path):
+    """Range dict with unknown keys or missing min/max raises ValueError."""
+    # Unknown key 'minimum' instead of 'min'
+    p1 = tmp_path / "typo_range.yaml"
+    p1.write_text("dataset: 'd'\nowner: 'o'\nschema:\n  - name: 'price'\n    range:\n      minimum: 0\n      max: 10\n")
+    with pytest.raises(ValueError, match="Unknown key.*range constraint"):
+        load_contract(p1)
+
+    # Empty range dict
+    p2 = tmp_path / "empty_range.yaml"
+    p2.write_text("dataset: 'd'\nowner: 'o'\nschema:\n  - name: 'price'\n    range: {}\n")
+    with pytest.raises(ValueError, match="at least 'min' or 'max'"):
+        load_contract(p2)
+
+
+def test_validation_result_dataframe_aliases(valid_contract_yaml):
+    """ValidationResult provides clean_df and dlq_df property aliases matching GLOSSARY."""
+    sql = "SELECT 1 AS order_id, 'CUST-001' AS customer_id, 'NEW' AS status, 10.0 AS amount"
+    result = run(sql=sql, contract=valid_contract_yaml)
+    assert result.clean_df is not None
+    assert result.clean_df.num_rows == 1
+    assert result.dlq_df is not None
+    assert result.dlq_df.num_rows == 0
+
+

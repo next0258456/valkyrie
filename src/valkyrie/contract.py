@@ -61,6 +61,11 @@ def parse_range(r_val: Any) -> Optional[RangeConstraint]:
             raise ValueError(f"Range list must contain exactly 2 numbers [min, max], got: {r_val}")
         return RangeConstraint(min=float(r_val[0]) if r_val[0] is not None else None, max=float(r_val[1]) if r_val[1] is not None else None)
     if isinstance(r_val, dict):
+        unknown_keys = set(r_val.keys()) - {"min", "max"}
+        if unknown_keys:
+            raise ValueError(f"Unknown key(s) in range constraint: {unknown_keys}. Only 'min' and 'max' are allowed.")
+        if "min" not in r_val and "max" not in r_val:
+            raise ValueError("Range dictionary must contain at least 'min' or 'max'.")
         min_v = float(r_val["min"]) if r_val.get("min") is not None else None
         max_v = float(r_val["max"]) if r_val.get("max") is not None else None
         return RangeConstraint(min=min_v, max=max_v)
