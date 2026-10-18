@@ -111,6 +111,16 @@ flowchart LR
 
 ---
 
+## Lộ Trình Phát Triển (Roadmap)
+
+- [x] DuckDB SQL Single-Pass Vectorized Compiler (`to_sql`).
+- [x] Adaptive Execution Strategy (`TEMPORARY VIEW` cho Big Data Streaming, `TEMPORARY TABLE` cho Interactive RAM).
+- [x] Zero-Boilerplate Cloud Storage (AWS S3 & MinIO auto secrets).
+- [x] Circuit Breaker & UTF-8 Diagnostic Banner (`ContractBreachException`).
+- [ ] **Roadmap v0.2+**: Hỗ trợ tùy chọn ghi trực tiếp vào Iceberg REST Catalog (`write_iceberg_table="silver.orders"`, `catalog="bifrost"`) thông qua Lazy Import để hoàn thiện 1-line pipeline khép kín.
+
+---
+
 ## Tài Liệu Chi Tiết
 
 * 📖 **[Cẩm Nang Kỹ Sư Dữ Liệu (DE Guide)](docs/DE_GUIDE.md)**: Hướng dẫn chi tiết cú pháp viết contract, các trường ràng buộc, và cách vận hành trong từng môi trường (Jupyter, Airflow, S3/MinIO, CLI, Iceberg/Bifrost, Circuit Breaker).

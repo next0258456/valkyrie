@@ -384,6 +384,23 @@ if clean_arrow and clean_arrow.num_rows > 0:
     print(f"Đã commit thành công {clean_arrow.num_rows:,} dòng sạch vào Iceberg Silver!")
 ```
 
+#### 🚀 Lộ Trình Hỗ Trợ Tương Lai: Tự Động Ghi Trực Tiếp Qua Catalog (Direct Catalog Sink)
+
+Trong các bản phát hành tiếp theo (**Roadmap v0.2+**), Valkyrie sẽ tích hợp cơ chế **Optional Catalog Sink** với phương thức **Lazy Import** (chỉ nạp `pyiceberg` khi người dùng chỉ định tham số, bảo vệ triệt để triết lý Zero-Bloat của core engine).
+
+Kỹ sư dữ liệu sẽ có thể uỷ thác toàn bộ luồng thẩm định và ACID commit vào bảng Iceberg chỉ với 1 dòng lệnh duy nhất:
+
+```python
+# [Tương lai - Dự kiến v0.2+]
+result = valkyrie.execute(
+    sql="SELECT * FROM 's3://lakehouse-bronze/orders/*.parquet'",
+    contract="contracts/orders_contract.yaml",
+    write_dlq="s3://lakehouse-dlq/orders/dlq.parquet",
+    write_iceberg_table="silver.orders",   # Tự động kết nối Bifrost và commit dữ liệu sạch
+    catalog="bifrost_catalog"              # REST Catalog URI hoặc Catalog Name
+)
+```
+
 ---
 
 ## 4. Tóm Tắt Các Mã Lỗi Chuẩn (Standard Error Codes)

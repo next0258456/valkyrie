@@ -57,6 +57,7 @@ Trong hệ sinh thái Data Lakehouse (Yggdrasil), Gate 1 và Gate 2 bảo vệ c
   1. **Python API trả về Arrow/DataFrame**: `clean_df, dlq_df = valkyrie.run(sql="...", contract="...")`
   2. **Pipeline tự động xuất ra đĩa/S3**: `valkyrie.execute(sql="...", contract="...", write_clean="...", write_dlq="...")`
   3. **CLI One-Liner**: `valkyrie run --sql "..." --contract "..."`
+- **Lộ trình tương lai (Roadmap v0.2+)**: Hỗ trợ tùy chọn ghi trực tiếp vào Iceberg REST Catalog (`write_iceberg_table="silver.orders"`, `catalog="bifrost"`) thông qua Lazy Import để bảo vệ tính Zero-Bloat của core engine trong khi mang lại trải nghiệm 1-line pipeline hoàn chỉnh cho Data Engineer.
 
 ### 2.5. Cơ chế Cầu dao Tự ngắt (Circuit Breaker) & Actionable Alert Banner
 - Nếu `error_rate > max_error_rate` hoặc gặp `quarantine_action == "FAIL_FAST"`, ném `ContractBreachException`.
